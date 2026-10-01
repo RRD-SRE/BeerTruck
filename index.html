@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title></title>
+<style>
+  :root {
+    color-scheme: light;
+    --paper: #f3edda;
+    --ink: #24231f;
+    --mid: #777366;
+    --line: #d1c9b4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: system-ui, sans-serif;
+  }
+  main { width: min(1100px, 100%); }
+  h1 {
+    margin: 0 0 10px;
+    font-size: clamp(1.7rem, 4vw, 3rem);
+    line-height: 1;
+    font-weight: 950;
+    letter-spacing: -.04em;
+  }
+  .frame {
+    position: relative;
+    overflow: hidden;
+    border: 4px solid var(--ink);
+    border-radius: 14px;
+    background: var(--paper);
+    box-shadow: 8px 8px 0 var(--ink);
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1000 / 560;
+    background: var(--paper);
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+    justify-content: center;
+  }
+  button {
+    min-width: 58px;
+    padding: 10px 14px;
+    border: 2px solid var(--ink);
+    border-radius: 8px;
+    background: var(--paper);
+    color: var(--ink);
+    font: 800 1rem system-ui, sans-serif;
+    box-shadow: 3px 3px 0 var(--ink);
+    touch-action: none;
+  }
+  button:active, button.active {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 var(--ink);
+    background: var(--ink);
+    color: var(--paper);
+  }
+  #restart {
+    position: absolute;
+    left: 50%;
+    top: 78%;
+    transform: translateX(-50%);
+    z-index: 1;
+    padding: 12px 24px;
+    border: 3px solid var(--ink);
+    background: var(--paper);
+    font-size: 1.2rem;
+    font-weight: 900;
+    cursor: pointer;
+  }
+  #restart[hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1></h1>
+  <div class="frame">
+    <canvas id="game" width="1000" height="560"></canvas>
+    <button id="restart" type="button" hidden>Restart</button>
+  </div>
+  <div class="controls" aria-label="Controls">
+    <button data-key="ArrowUp">↑</button>
+    <button data-key="ArrowDown">↓</button>
+    <button data-key="ArrowLeft">←</button>
+    <button data-key="ArrowRight">→</button>
+    <button data-key="Space">Space</button>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+/* All game wording is collected here. */
+const WORDS = {
+  title: "Beer truck run",
+  start: "Tallinn",
+  finish: "Tartu",
+  logo: "Stoneridge",
+  distance: "km to drive",
+  eta: "ETA",
+  speed: "km/h",
+  ahead: "Ahead",
+  behind: "Behind",
+  onTime: "On time",
+  moose: "moose",
+  police: "police",
+  gameOver: "GAME OVER",
+  win: "we made it! the beers have arrived!",
+  bonusBreak: "bonus 15min break",
+  arrows: ["↑", "↓", "←", "→"],
+  space: "Space"
+};
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const restartButton = document.getElementById("restart");
+const W = 1000;
+const H = 560;
+const ROAD_TOP = 122;
+const ROAD_BOTTOM = 490;
+const LANES = [184, 305, 426];
+const TRUCK_X = 170;
+const POLICE_SIGHT_RANGE = W * 0.75;
+const GAME_DURATION_SECONDS = 60;
+const AVERAGE_SPEED_KMH = 90;
+const ROUTE_KM = 186;
+const ROUTE_KM_PER_GAME_SECOND = ROUTE_KM / GAME_DURATION_SECONDS;
+const MIN_MOOSE_SPACING = 90;
+const keys = new Set();
+
+document.title = WORDS.title;
+document.querySelector("h1").textContent = WORDS.title;
+canvas.setAttribute("aria-label", WORDS.title);
+
+let lastTime = 0;
+let elapsed = 0;
+let speed = 80;
+let distance = 0;
+let lane = 1;
+let lanePosition = 1;
+let overspeedTime = 0;
+let blinkTime = 0;
+let policeMeasuring = false;
+let moose = [];
+let police = [];
+let nextMoose = 2.5;
+let nextPolice = 10;
+let endReason = "";
+let gameOver = false;
+let victory = false;
+let bonusBreakEarned = false;
+let roadOffset = 0;
+let laneLineOffset = 0;
+
+function resizeCanvas() {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+}
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+function formatDuration(seconds) {
+  const totalSeconds = Math.max(0, Math.ceil(seconds));
+  return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
+
+function resetGame() {
+  elapsed = 0;
+  speed = 80;
+  distance = 0;
+  lane = 1;
+  lanePosition = 1;
+  overspeedTime = 0;
+  blinkTime = 0;
+  policeMeasuring = false;
+  moose = [];
+  police = [];
+  nextMoose = 2.5;
+  nextPolice = 10;
+  roadOffset = 0;
+  laneLineOffset = 0;
+  endReason = "";
+  gameOver = false;
+  victory = false;
+  bonusBreakEarned = false;
+  restartButton.hidden = true;
+}
+
+function endGame(reason) {
+  gameOver = true;
+  endReason = reason;
+  keys.clear();
+  restartButton.hidden = false;
+}
+
+restartButton.addEventListener("click", resetGame);
+
+function keyDown(event) {
+  const code = event.code;
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(code)) {
+    event.preventDefault();
+  }
+  if (gameOver && code === "Enter") {
+    resetGame();
+    return;
+  }
+  if (event.repeat) return;
+  keys.add(code);
+
+  if (code === "ArrowUp") lane = Math.max(0, lane - 1);
+  if (code === "ArrowDown") lane = Math.min(2, lane + 1);
+}
+function keyUp(event) {
+  keys.delete(event.code);
+}
+window.addEventListener("keydown", keyDown);
+window.addEventListener("keyup", keyUp);
+window.addEventListener("blur", () => keys.clear());
+
+document.querySelectorAll("button[data-key]").forEach(button => {
+  const code = button.dataset.key;
+  const down = event => {
+    event.preventDefault();
+    button.classList.add("active");
+    if (!keys.has(code)) {
+      keys.add(code);
+      if (code === "ArrowUp") lane = Math.max(0, lane - 1);
+      if (code === "ArrowDown") lane = Math.min(2, lane + 1);
+    }
+  };
+  const up = event => {
+    event.preventDefault();
+    button.classList.remove("active");
+    keys.delete(code);
+  };
+  button.addEventListener("pointerdown", down);
+  button.addEventListener("pointerup", up);
+  button.addEventListener("pointercancel", up);
+  button.addEventListener("pointerleave", up);
+});
+
+function findOpenMooseLane(spawnX) {
+  const nearbyMoose = moose.filter(item => Math.abs(item.x - spawnX) <= 116);
+  if (nearbyMoose.some(item => Math.abs(item.x - spawnX) < MIN_MOOSE_SPACING)) return null;
+
+  const openLanes = [0, 1, 2].filter(candidateLane => {
+    for (let firstIndex = 0; firstIndex < nearbyMoose.length; firstIndex++) {
+      const first = nearbyMoose[firstIndex];
+      if (first.lane === candidateLane) continue;
+
+      for (let secondIndex = firstIndex + 1; secondIndex < nearbyMoose.length; secondIndex++) {
+        const second = nearbyMoose[secondIndex];
+        if (second.lane === candidateLane || second.lane === first.lane) continue;
+
+        const overlapStart = Math.max(spawnX - 58, first.x - 58, second.x - 58);
+        const overlapEnd = Math.min(spawnX + 58, first.x + 58, second.x + 58);
+        if (overlapStart <= overlapEnd) return false;
+      }
+    }
+    return true;
+  });
+
+  return openLanes.length
+    ? openLanes[Math.floor(Math.random() * openLanes.length)]
+    : null;
+}
+
+function update(dt) {
+  if (gameOver) return;
+
+  const previousElapsed = elapsed;
+  const previousDistance = distance;
+  const frameTime = Math.min(dt, GAME_DURATION_SECONDS - elapsed);
+  elapsed += frameTime;
+  blinkTime += frameTime;
+
+  const accelerating = keys.has("ArrowRight");
+  const braking = keys.has("ArrowLeft");
+  const boosting = accelerating && keys.has("Space");
+
+  if (braking) {
+    speed -= 48 * frameTime;
+  } else if (speed > 90 && !boosting) {
+    speed -= 25 * frameTime;
+  } else if (accelerating) {
+    speed += 25 * frameTime;
+    if (!boosting) speed = Math.min(90, speed);
+  } else {
+    speed -= 10 * frameTime;
+  }
+  speed = Math.max(0, speed);
+
+  if (boosting) {
+    speed = Math.min(110, speed);
+  }
+
+  lanePosition += (lane - lanePosition) * Math.min(1, frameTime * 9);
+  const distancePerSecond = speed / AVERAGE_SPEED_KMH * ROUTE_KM_PER_GAME_SECOND;
+  distance += distancePerSecond * frameTime;
+  roadOffset = (roadOffset + speed * frameTime * 1.5) % 120;
+  laneLineOffset = (laneLineOffset + speed * frameTime * 2.25) % 120;
+
+  if (elapsed >= nextMoose) {
+    const spawnX = W + 50;
+    const openLane = findOpenMooseLane(spawnX);
+    if (openLane !== null) {
+      moose.push({ x: spawnX, lane: openLane });
+      nextMoose = elapsed + 1 + Math.random() * 0.8;
+    } else {
+      nextMoose = elapsed + 0.5;
+    }
+  }
+  if (elapsed >= nextPolice) {
+    police.push({ x: W + 70, side: Math.random() < 0.5 ? "top" : "bottom" });
+    nextPolice = elapsed + 13 + Math.random() * 7;
+  }
+
+  const worldSpeed = speed * 1.8;
+  const mooseSpeed = 110 + worldSpeed * 1.8;
+  moose.forEach(item => item.x -= mooseSpeed * frameTime);
+  police.forEach(item => item.x -= worldSpeed * frameTime);
+
+  policeMeasuring = police.some(item => {
+    const visible = item.x + 30 >= 0 && item.x - 30 <= W;
+    const inLineOfSight = Math.abs(item.x - TRUCK_X) <= POLICE_SIGHT_RANGE;
+    return visible && inLineOfSight;
+  });
+
+  if (speed > 90 && policeMeasuring) {
+    overspeedTime += dt;
+    if (overspeedTime >= 3) {
+      endGame(WORDS.police);
+      return;
+    }
+  } else {
+    overspeedTime = 0;
+  }
+
+  for (const item of moose) {
+    const playerY = LANES[Math.round(lanePosition)];
+    const mooseY = LANES[item.lane];
+    if (Math.abs(item.x - TRUCK_X) < 58 && Math.abs(playerY - mooseY) < 42) {
+      endGame(WORDS.moose);
+      return;
+    }
+  }
+
+  moose = moose.filter(item => item.x > -100);
+  police = police.filter(item => item.x > -130);
+
+  if (distance >= ROUTE_KM - 1e-9) {
+    const arrivalTime = previousElapsed + (ROUTE_KM - previousDistance) / distancePerSecond;
+    if (arrivalTime < GAME_DURATION_SECONDS) {
+      distance = ROUTE_KM;
+      elapsed = arrivalTime;
+      victory = true;
+      bonusBreakEarned = GAME_DURATION_SECONDS - arrivalTime > 5;
+      endGame("");
+      return;
+    }
+  }
+
+  if (elapsed >= GAME_DURATION_SECONDS) {
+    endGame("");
+  }
+}
+
+function roundedRect(x, y, w, h, r, fill, stroke) {
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 3; ctx.stroke(); }
+}
+
+function drawRoad() {
+  ctx.fillStyle = "#f3edda";
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = "#d9d1bc";
+  ctx.fillRect(0, ROAD_TOP - 22, W, ROAD_BOTTOM - ROAD_TOP + 44);
+  ctx.fillStyle = "#24231f";
+  ctx.fillRect(0, ROAD_TOP, W, ROAD_BOTTOM - ROAD_TOP);
+
+  ctx.fillStyle = "#f3edda";
+  ctx.fillRect(0, ROAD_TOP, W, 5);
+  ctx.fillRect(0, ROAD_BOTTOM - 5, W, 5);
+
+  ctx.setLineDash([34, 26]);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "#777366";
+  for (const y of [245, 367]) {
+    ctx.beginPath();
+    ctx.moveTo(-120 - laneLineOffset, y);
+    ctx.lineTo(W + 120, y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  for (let i = 0; i < 13; i++) {
+    const x = (i * 100 - roadOffset * 1.4 + 1400) % 1200 - 100;
+    ctx.fillStyle = "#777366";
+    ctx.fillRect(x, 75, 4, 25);
+    ctx.fillRect(x + 17, 87, 22, 3);
+    ctx.fillRect(x, 510, 4, 25);
+  }
+}
+
+function drawTruck(x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+  const blink = speed > 90 && policeMeasuring && Math.floor(blinkTime * 8) % 2 === 0;
+  ctx.globalAlpha = blink ? 0.42 : 1;
+
+  roundedRect(-43, -28, 104, 56, 7, "#f3edda", "#24231f");
+  ctx.fillStyle = "#24231f";
+  ctx.fillRect(45, -21, 24, 42);
+  ctx.fillStyle = "#d1c9b4";
+  ctx.fillRect(49, -16, 15, 11);
+  ctx.strokeStyle = "#24231f";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(-29, -20, 76, 40);
+
+  ctx.fillStyle = "#24231f";
+  ctx.font = "bold 13px system-ui";
+  ctx.textAlign = "center";
+  ctx.fillText(WORDS.logo, 8, 5);
+
+  ctx.fillStyle = "#24231f";
+  for (const wx of [-25, 23, 53]) {
+    ctx.beginPath();
+    ctx.arc(wx, 29, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#d1c9b4";
+    ctx.beginPath();
+    ctx.arc(wx, 29, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#24231f";
+  }
+  ctx.restore();
+}
+
+function drawMoose(x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = "#f3edda";
+  ctx.strokeStyle = "#f3edda";
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.ellipse(0, -4, 25, 15, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(24, -13, 11, 9, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(22, -22); ctx.lineTo(14, -37); ctx.lineTo(8, -39);
+  ctx.moveTo(18, -28); ctx.lineTo(4, -28);
+  ctx.moveTo(29, -22); ctx.lineTo(36, -37); ctx.lineTo(43, -39);
+  ctx.moveTo(33, -28); ctx.lineTo(46, -28);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-15, 7); ctx.lineTo(-19, 27);
+  ctx.moveTo(-2, 8); ctx.lineTo(-3, 27);
+  ctx.moveTo(13, 7); ctx.lineTo(17, 27);
+  ctx.moveTo(23, 4); ctx.lineTo(27, 25);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPolice(x, side) {
+  const y = side === "top" ? ROAD_TOP - 30 : ROAD_BOTTOM + 30;
+  ctx.save();
+  ctx.translate(x, y);
+
+  ctx.fillStyle = "#24231f";
+  for (const wheelX of [-22, 17]) {
+    roundedRect(wheelX, -19, 12, 6, 2, "#24231f");
+    roundedRect(wheelX, 13, 12, 6, 2, "#24231f");
+  }
+
+  roundedRect(-34, -15, 68, 30, 9, "#f3edda", "#24231f");
+  roundedRect(-11, -12, 25, 24, 6, "#d1c9b4", "#24231f");
+  ctx.strokeStyle = "#24231f";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(18, -11);
+  ctx.lineTo(18, 11);
+  ctx.moveTo(-20, -11);
+  ctx.lineTo(-20, 11);
+  ctx.stroke();
+
+  ctx.fillStyle = "#24231f";
+  ctx.fillRect(29, -8, 5, 5);
+  ctx.fillRect(29, 3, 5, 5);
+  ctx.fillRect(-34, -8, 4, 5);
+  ctx.fillRect(-34, 3, 4, 5);
+
+  roundedRect(-5, -3, 15, 6, 2, "#24231f");
+  const flashOn = Math.floor(blinkTime * 8) % 2 === 0;
+  ctx.fillStyle = flashOn ? "#f3edda" : "#777366";
+  ctx.fillRect(-3, -2, 6, 4);
+  ctx.fillStyle = flashOn ? "#777366" : "#f3edda";
+  ctx.fillRect(4, -2, 5, 4);
+  ctx.fillStyle = "#24231f";
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = "#24231f";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.font = "900 25px system-ui";
+  ctx.fillText(WORDS.start, 25, 38);
+  ctx.fillText("→", 142, 38);
+  ctx.fillText(WORDS.finish, 177, 38);
+
+  ctx.textAlign = "right";
+  ctx.font = "800 20px system-ui";
+  const remainingDistance = Math.max(0, ROUTE_KM - distance);
+  ctx.fillText(`${Math.ceil(remainingDistance)} ${WORDS.distance}`, 975, 30);
+  const distancePerSecond = speed / AVERAGE_SPEED_KMH * ROUTE_KM_PER_GAME_SECOND;
+  const eta = distancePerSecond > 0 ? formatDuration(remainingDistance / distancePerSecond) : "--:--";
+  ctx.fillText(`${WORDS.eta} ${eta}`, 975, 59);
+  ctx.font = "800 17px system-ui";
+  const timeToDeadline = GAME_DURATION_SECONDS - elapsed;
+  const timeBuffer = distancePerSecond > 0
+    ? Math.round(timeToDeadline - remainingDistance / distancePerSecond)
+    : -Math.ceil(timeToDeadline);
+  const scheduleStatus = timeBuffer > 0
+    ? `${WORDS.ahead} +${timeBuffer}s`
+    : timeBuffer < 0
+      ? `${WORDS.behind} ${timeBuffer}s`
+      : WORDS.onTime;
+  ctx.fillText(scheduleStatus, 975, 88);
+
+  const speedText = `${Math.round(speed)} ${WORDS.speed}`;
+  ctx.textAlign = "center";
+  ctx.font = "950 27px system-ui";
+  ctx.fillText(speedText, 500, 43);
+
+  const progress = Math.min(1, distance / ROUTE_KM);
+  ctx.fillStyle = "#d1c9b4";
+  ctx.fillRect(24, 106, 850, 8);
+  ctx.fillStyle = "#24231f";
+  ctx.fillRect(24, 106, 850 * progress, 8);
+  ctx.textAlign = "right";
+  ctx.font = "800 14px system-ui";
+  ctx.fillText(`${Math.round(progress * 100)}%`, 976, 110);
+}
+
+function drawOverlay() {
+  if (!gameOver) return;
+  ctx.fillStyle = "rgba(243, 237, 218, .91)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#24231f";
+  if (victory) {
+    ctx.font = "950 46px system-ui";
+    ctx.fillText(WORDS.win, W / 2, H / 2 - 25);
+    if (bonusBreakEarned) {
+      ctx.font = "900 30px system-ui";
+      ctx.fillText(WORDS.bonusBreak, W / 2, H / 2 + 36);
+    }
+    return;
+  }
+  ctx.font = "950 68px system-ui";
+  ctx.fillText(WORDS.gameOver, W / 2, H / 2 - 24);
+  if (endReason) {
+    ctx.font = "900 34px system-ui";
+    ctx.fillText(endReason, W / 2, H / 2 + 34);
+  }
+}
+
+function draw() {
+  drawRoad();
+  drawHUD();
+
+  for (const item of moose) drawMoose(item.x, LANES[item.lane]);
+  for (const item of police) drawPolice(item.x, item.side);
+
+  drawTruck(TRUCK_X, LANES[Math.round(lanePosition)]);
+  drawOverlay();
+}
+
+function frame(time) {
+  const dt = Math.min(0.05, (time - lastTime) / 1000 || 0);
+  lastTime = time;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
